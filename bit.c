@@ -15,6 +15,8 @@ WARN NEVER DECLARE CONST IN HEADER FILE, DO THAT ONLY VARIABLES, SEE MORE https:
 DATA RATE: 9600bps
 TRANSMIT INTERVAL: 1sec
 FRAME LENGTH: 32Bytes in normal, data5: 2.5ug/m^3, data6: 10ug/m^3
+ACTIVE CURRENT <= 100 milliAmps = 100,000 microAmps
+STANDBY CURRENT <= 200 microAmps
 
 ------------------------------------------------
 |PREAMBLE(2) | LENGTH(2) | DATA(26) | CHECK(2) |   (Bytes)
@@ -143,7 +145,7 @@ void set_passive(int fd)
                 break;
         }
     }
-   
+    
     return ;    
 }
 
@@ -326,7 +328,7 @@ void robust_sensor_main(int fd)
 
         sleep_sensor(fd);
         printf("GOING TO SLEEP %dsec\n", SLEEPTIME);
-        sleep(1);
+        sleep(SLEEPTIME);
 
         wakeup_sensor(fd);
         printf("WAKE UP, WAIT %dsec\n", SLEEPTIME);
