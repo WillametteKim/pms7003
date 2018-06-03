@@ -5,16 +5,22 @@ Ajou Univ., Dept of Software, Hyunsoo Kim
 TODO O_SYNC|O_DIRECT : http://heart4u.co.kr/tblog/476
 TODO KENRNEL MODULE
 TODO EXCEPTION HANDLE
-TODO THREAD, 아으 read 전담 쓰레드 만들어줘야 하겠다. READ WRITE CONTORL THREADs
+TODO THREAD, 아으 read 전담 쓰레드 만들어줘야 하겠다. READ WRITE CONTORL THREADs?
+TODO DATA CLASSIFY
+TODO CHANGE TO PASSIVE MODE, do i check ans?
 TODO LCD DISPLAY
 TODO stderr
+TOOD use mean value to statistically correct
+TODO TIMEOUT
+
+TODO MMAP은 이득이 별로 없다.
 
 WARN NEVER DECLARE CONST IN HEADER FILE, DO THAT ONLY VARIABLES, SEE MORE https://stackoverflow.com/questions/9846920/define-array-in-c
 
 <PMS7003 SENSOR SPEC>
 DATA RATE: 9600bps
 TRANSMIT INTERVAL: 1sec
-FRAME LENGTH: 32Bytes in normal, data5: 2.5ug/m^3, data6: 10ug/m^3
+FRAME LENGTH: 32Bytes in normal, data4: 0.3~1ug/m^3, data5: 2.5ug/m^3, data6: 10ug/m^3
 
 ------------------------------------------------
 |PREAMBLE(2) | LENGTH(2) | DATA(26) | CHECK(2) |   (Bytes)
@@ -30,18 +36,11 @@ void set_passive(int fd)                //set sensor to passive mode to reduce p
 void wakeup_sensor(int fd)              //send msg to sensor to wake up, and wait 30sec to stabilize
 int sendReadCmd(int fd)                 //send msg to sensor to read data, return sndMsgBytes
 int sync_read(int fd, unsigned char *frame) //sync with sensor and read, return 0 on success
-int check_frame(unsigned char *frame)   //parse and calc checksum, return 0 on success
+int parse_frame(unsigned char *frame)   //parse and calc checksum, return 0 on success
 void sleep_sensor(int fd)               //send msg to sensor to sleep
-void robust_sensor_main(int fd) 
-
-<WHO fine dust criteria>
-    PM 2.5    PM 10 
-좋음 0~15     0~30
-보통 16~25    31~50
-나쁨 26~50    51~100
-극한 51~      101~
 */
 
+#include <termbits.h>
 #include <errno.h>
 #include <fcntl.h> 
 #include <stdio.h>
@@ -52,12 +51,14 @@ void robust_sensor_main(int fd)
 #include <unistd.h>
 #include <math.h>
 #include <stdint.h>
+#include 
+
 
 #define BUFLEN 8
 #define FRAMELEN 32
 #define CMDLEN 7
 #define CMDANSLEN 8
-#define SLEEPTIME 30
+#define SLEEPTIME 4
 
 const unsigned char cmdSetPassive [CMDLEN]  = {0x42, 0x4D, 0xE1, 0x00, 0x00, 0x01, 0x70};  
 const unsigned char cmdSetPassive_ans[CMDANSLEN] = {0x42, 0x4d, 0x00, 0x04, 0xe1, 0x00, 0x01, 0x74}; //expecting answer 42 4D 00 04 E1 00 01 74
@@ -72,6 +73,19 @@ const char *portname = "/dev/ttyAMA0";
 int set_interface_attribs(int fd, int speed)
 {
     struct termios tty;
+
+    struct ktermios tty_std_termios = {     /* for the benefit of tty drivers  */
+        .c_iflag = ICRNL | IXON,
+        .c_oflag = OPOST | ONLCR,
+        .c_cflag = B38400 | CS8 | CREAD | HUPCL,
+        .c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK |
+                   ECHOCTL | ECHOKE | IEXTEN,
+        .c_cc = INIT_C_CC,
+        .c_ispeed = 38400,
+        .c_ospeed = 38400
+    };
+
+EXPORT_SYMBOL(tty_std_termios);
 
     if (tcgetattr(fd, &tty) < 0) {
         printf("Error from tcgetattr: %s\n", strerror(errno));
@@ -233,7 +247,7 @@ int sync_read(int fd, unsigned char *frame)
 
 
 //VALIDATE FRAME AND PARSE
-int check_frame(unsigned char *frame)
+int parse_frame(unsigned char *frame)
 {
     for(int i = 0; i < FRAMELEN; i++) printf("%d", frame[i]); 
         printf("\n");
@@ -245,7 +259,11 @@ int check_frame(unsigned char *frame)
     int checksum = frame[30] * pow(16,2) + frame[31]; //conversion between Hex<->Dec
 
     if(sum == checksum) {
-        //printf("PM 1.0: %d ", pm1_0);
+        int pm1_0;
+        int pm2_5;
+        int pm10;
+
+        printf("PM 1.0: %d ", frame[10]<<8 | frame[11]);
         printf("PM 2.5: %d ", frame[12]<<8 | frame[13]);
         printf("PM 10.: %d\n", frame[14]<<8 | frame[15]);
         return 0;
@@ -261,82 +279,25 @@ int check_frame(unsigned char *frame)
 //SLEEP SENSOR 
 void sleep_sensor(int fd)
 {
-    int wrlen, rdlen;
+    int retval;
     int tryCount = 0;
-    unsigned char buf[BUFLEN +1];
 
-    while(1) {
-        wrlen = write(fd, cmdSleep, CMDLEN);
-        
-        if(wrlen != CMDLEN) {
+    while(1){
+        if((retval = write(fd, cmdSleep, CMDLEN)) != CMDLEN) {
             tryCount++;
-            printf("Err from set_passive(), tried %d times\n", tryCount); 
+            printf("Err from sleep_sensor(), tried %d times\n", tryCount); 
         }
 
-        else {
-            rdlen = read(fd, buf, CMDANSLEN);
-            if(rdlen == CMDANSLEN && strncmp(buf, cmdSleep_ans, CMDLEN) == 0)
-                break;
-        }
-    }//while
-    return ;
+        else 
+            break;
+    }
+    return ;    
 }
 
-void robust_sensor_main(int fd) 
-{
-    unsigned char frame[FRAMELEN +1];
-    int pm2_5, pm10;
-    int statistic_loop;
-    char status;
-
-    while(1) {
-        
-        while(statistic_loop-- > 0) {
-            while(1) {
-                int retval;
-                if( (retval = sendReadCmd(fd)) != CMDLEN)  {
-                    printf("sendReadCmd: %d", retval);
-                    continue;
-                }
-                if( (retval = sync_read(fd, frame)) != 0) {
-                    printf("sync_read: %d", retval);
-                    continue;
-                }
-                if( (retval = check_frame(frame)) != 0) {
-                    printf("check_frame: %d", retval);
-                    continue;
-                }
-                else break; //we acquired good frame!
-            }
-
-            pm2_5 += frame[12]<<8 | frame[13];
-            pm10 += frame[14]<<8 | frame[15];
-        }//statistical loop, read 3 frame and get mean val;
-
-        //okay with lose info about point
-        pm2_5 = pm2_5 / 3;
-        pm10 = pm10 / 3;
-
-        if(pm2_5 > 25 && pm10 > 50)
-            status = 'b';
-        else status = 'g';
-
-        printf("%d %d %c\n", pm2_5, pm10, status);
-        pm2_5 = 0; pm10 = 0; statistic_loop = 3;
-
-        sleep_sensor(fd);
-        printf("GOING TO SLEEP %dsec\n", SLEEPTIME);
-        sleep(1);
-
-        wakeup_sensor(fd);
-        printf("WAKE UP, WAIT %dsec\n", SLEEPTIME);
-        sleep(SLEEPTIME);
-
-    }//while
-}
 
 int main()
 {
+    unsigned char frame[FRAMELEN +1];
     int fd;
 
     //OPEN DATA STREAM
@@ -357,7 +318,31 @@ int main()
     //SET PASSIVE MODE TO HIBERNATE
     set_passive(fd);
 
-    robust_sensor_main(fd);
+    while(1) {
+        while(1) {
+            int retval;
+            if( (retval = sendReadCmd(fd)) != CMDLEN)  {
+                printf("sendReadCmd: %d", retval);
+                continue;
+            }
+            if( (retval = sync_read(fd, frame)) != 0) {
+                printf("sync_read: %d", retval);
+                continue;
+            }
+            if( (retval = parse_frame(frame)) != 0) {
+                printf("parse_frame: %d", retval);
+                continue;
+            }
+            else break;
+        }
 
+        sleep_sensor(fd);
+        printf("GOING TO SLEEP %dsec\n\n", SLEEPTIME);
+        sleep(SLEEPTIME);
+
+        wakeup_sensor(fd);
+        printf("WAKE UP, WAIT %dsec\n", SLEEPTIME);
+        sleep(SLEEPTIME);
+    }
     return 0;
 }//main
