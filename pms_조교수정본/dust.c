@@ -34,7 +34,7 @@ int sendReadCmd(int fd)                 //send msg to sensor to read data, retur
 int sync_read(int fd, unsigned char *frame) //sync with sensor and read, return 0 on success
 int check_frame(unsigned char *frame)   //parse and calc checksum, return 0 on success
 void sleep_sensor(int fd)               //send msg to sensor to sleep
-void robust_sensor_main(int fd) 
+char robust_sensor_main(int fd) 
 
 <WHO fine dust criteria>
     PM 2.5    PM 10 
@@ -44,22 +44,12 @@ void robust_sensor_main(int fd)
 극한 51~      101~
 */
 
-#include <errno.h>
-#include <fcntl.h> 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <termios.h>
-#include <unistd.h>
-#include <unistd.h>
-#include <math.h>
-#include <stdint.h>
+#include "dust.h"
 
 #define BUFLEN 8
 #define FRAMELEN 32
 #define CMDLEN 7
 #define CMDANSLEN 8
-#define SLEEPTIME 30
 
 const unsigned char cmdSetPassive [CMDLEN]  = {0x42, 0x4D, 0xE1, 0x00, 0x00, 0x01, 0x70};  
 const unsigned char cmdSetPassive_ans[CMDANSLEN] = {0x42, 0x4d, 0x00, 0x04, 0xe1, 0x00, 0x01, 0x74}; //expecting answer 42 4D 00 04 E1 00 01 74
@@ -70,6 +60,7 @@ const unsigned char cmdSleep_ans[CMDANSLEN] = {0x42, 0x4d, 0x00, 0x04, 0xe4, 0x0
 const char preamble1 = 'B'; //0x42 in ASCII
 const char preamble2 = 'M'; //0x4d in ASCII
 const char *portname = "/dev/ttyAMA0";
+
 
 int set_interface_attribs(int fd, int speed)
 {
@@ -145,7 +136,7 @@ void set_passive(int fd)
                 break;
         }
     }
-    
+   
     return ;    
 }
 
@@ -247,7 +238,11 @@ int check_frame(unsigned char *frame)
     int checksum = frame[30] * pow(16,2) + frame[31]; //conversion between Hex<->Dec
 
     if(sum == checksum) {
-        //printf("PM 1.0: %d ", pm1_0);
+        int pm1_0;
+        int pm2_5;
+        int pm10;
+
+        printf("PM 1.0: %d ", frame[10]<<8 | frame[11]);
         printf("PM 2.5: %d ", frame[12]<<8 | frame[13]);
         printf("PM 10.: %d\n", frame[14]<<8 | frame[15]);
         return 0;
@@ -263,83 +258,77 @@ int check_frame(unsigned char *frame)
 //SLEEP SENSOR 
 void sleep_sensor(int fd)
 {
-    int wrlen, rdlen;
+    int retval;
     int tryCount = 0;
-    unsigned char buf[BUFLEN +1];
 
-    while(1) {
-        wrlen = write(fd, cmdSleep, CMDLEN);
-        
-        if(wrlen != CMDLEN) {
+    while(1){
+        if((retval = write(fd, cmdSleep, CMDLEN)) != CMDLEN) {
             tryCount++;
-            printf("Err from set_passive(), tried %d times\n", tryCount); 
+            printf("Err from sleep_sensor(), tried %d times\n", tryCount); 
         }
 
-        else {
-            rdlen = read(fd, buf, CMDANSLEN);
-            if(rdlen == CMDANSLEN && strncmp(buf, cmdSleep_ans, CMDLEN) == 0)
-                break;
+        else 
+            break;
+    }
+    return ;    
+}
+
+void robust_sensor_main(int fd, unsigned short int *val) 
+{
+    wakeup_sensor(fd);
+
+    unsigned char frame[FRAMELEN +1];
+    int pm2_5 = 0;
+    int pm10  = 0;
+    int statistic_loop=3;
+    char status;
+        
+    while(statistic_loop-- > 0) {
+        while(1) {
+            int retval;
+            if( (retval = sendReadCmd(fd)) != CMDLEN)  {
+                printf("sendReadCmd: %d", retval);
+                continue;
+            }
+            if( (retval = sync_read(fd, frame)) != 0) {
+                printf("sync_read: %d", retval);
+                continue;
+            }
+            if( (retval = check_frame(frame)) != 0) {
+                printf("check_frame: %d", retval);
+                continue;
+            }
+            else break; //we acquired good frame!
         }
-    }//while
+
+        pm2_5 += frame[12]<<8 | frame[13];
+        pm10 += frame[14]<<8 | frame[15];
+    }//statistical loop, read 3 frame and get mean val;
+
+    //okay with lose info about point
+    pm2_5 = pm2_5 / 3;
+    pm10 = pm10 / 3;
+
+    if(pm2_5 > 25 && pm10 > 50)
+        status = 'B';
+    else 
+        status = 'G';
+
+    printf("%d %d %c\n", pm2_5, pm10, status);
+    val[0] = status;
+    val[1] = pm2_5;
+    val[2] = pm10;
+    //pm2_5 = 0; pm10 = 0; statistic_loop = 3;
+
+    sleep_sensor(fd);
+
     return ;
 }
 
-void robust_sensor_main(int fd) 
-{
-    unsigned char frame[FRAMELEN +1];
-    int pm2_5, pm10;
-    int statistic_loop;
-    char status;
-
-    while(1) {
-        
-        while(statistic_loop-- > 0) {
-            while(1) {
-                int retval;
-                if( (retval = sendReadCmd(fd)) != CMDLEN)  {
-                    printf("sendReadCmd: %d", retval);
-                    continue;
-                }
-                if( (retval = sync_read(fd, frame)) != 0) {
-                    printf("sync_read: %d", retval);
-                    continue;
-                }
-                if( (retval = check_frame(frame)) != 0) {
-                    printf("check_frame: %d", retval);
-                    continue;
-                }
-                else break; //we acquired good frame!
-            }
-
-            pm2_5 += frame[12]<<8 | frame[13];
-            pm10 += frame[14]<<8 | frame[15];
-        }//statistical loop, read 3 frame and get mean val;
-
-        //okay with lose info about point
-        pm2_5 = pm2_5 / 3;
-        pm10 = pm10 / 3;
-
-        if(pm2_5 > 25 && pm10 > 50)
-            status = 'b';
-        else status = 'g';
-
-        printf("%d %d %c\n", pm2_5, pm10, status);
-        pm2_5 = 0; pm10 = 0; statistic_loop = 3;
-
-        sleep_sensor(fd);
-        printf("GOING TO SLEEP %dsec\n", SLEEPTIME);
-        sleep(SLEEPTIME);
-
-        wakeup_sensor(fd);
-        printf("WAKE UP, WAIT %dsec\n", SLEEPTIME);
-        sleep(SLEEPTIME);
-
-    }//while
-}
-
-int main()
+int sensor_init() 
 {
     int fd;
+    char status;
 
     //OPEN DATA STREAM
     fd = open(portname, O_RDWR | O_NOCTTY | O_SYNC);
@@ -358,8 +347,6 @@ int main()
 
     //SET PASSIVE MODE TO HIBERNATE
     set_passive(fd);
-
-    robust_sensor_main(fd);
-
-    return 0;
-}//main
+    
+    return fd;
+}
